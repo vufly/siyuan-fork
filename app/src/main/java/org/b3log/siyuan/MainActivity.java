@@ -22,6 +22,7 @@ import android.app.Activity;
 import android.content.ClipData;
 import android.content.ContentValues;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Color;
@@ -32,7 +33,9 @@ import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
+import android.provider.DocumentsContract;
 import android.provider.MediaStore;
+import android.provider.Settings;
 import android.util.Log;
 import android.view.DragEvent;
 import android.view.View;
@@ -100,8 +103,12 @@ public class MainActivity extends AppCompatActivity implements com.blankj.utilco
     private String webViewVer;
     private String userAgent;
     private ValueCallback<Uri[]> uploadMessage;
+    private String homeDirPath = "";
     private static final int REQUEST_SELECT_FILE = 100;
     private static final int REQUEST_CAMERA = 101;
+    private static final int REQUEST_MANAGE_ALL_CODE = 200;
+    private static final int REQUEST_STORAGE_PERMISSION = 201;
+    private static final int FOLDER_PICKER_CODE = 202;
 
     @Override
     public void onNewIntent(final Intent intent) {
@@ -119,6 +126,28 @@ public class MainActivity extends AppCompatActivity implements com.blankj.utilco
         Log.i("boot", "create main activity");
 
         super.onCreate(savedInstanceState);
+
+        // Check if storage permission is granted
+        if (FileAccessAllowed()) {
+            checkPrefForSavedFolder();
+        } else {
+            Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
+            Uri uri = Uri.fromParts("package", this.getPackageName(), null);
+            intent.setData(uri);
+            startActivityForResult(intent, REQUEST_MANAGE_ALL_CODE);
+        }
+    }
+    public static boolean FileAccessAllowed() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            return true;
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            return (Environment.isExternalStorageManager());
+        }
+        return false;
+    }
+
+    private void startWithHomeFolder(String path) {
+        homeDirPath = path;
         setContentView(R.layout.activity_main);
 
         // 启动 HTTP Server
@@ -151,6 +180,28 @@ public class MainActivity extends AppCompatActivity implements com.blankj.utilco
         AndroidBug5497Workaround.assistActivity(this);
     }
 
+    private void checkPrefForSavedFolder() {
+        SharedPreferences prefs = getSharedPreferences("app_prefs", MODE_PRIVATE);
+        String savedPath = prefs.getString("home_dir", null);
+        if (savedPath != null) {
+            startWithHomeFolder(savedPath);
+        } else {
+            // No saved folder found, prompt user to choose one
+            pickStorageHomeFolder();
+        }
+    }
+
+    private void pickStorageHomeFolder() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        startActivityForResult(intent, FOLDER_PICKER_CODE);
+    }
+    
+    private void saveFolderPath(String path) {
+        SharedPreferences prefs = getSharedPreferences("app_prefs", MODE_PRIVATE);
+        SharedPreferences.Editor editor = prefs.edit();
+        editor.putString("home_dir", path);
+        editor.apply();
+    }
     private void initUIElements() {
         bootLogo = findViewById(R.id.bootLogo);
         bootProgressBar = findViewById(R.id.progressBar);
@@ -374,7 +425,7 @@ public class MainActivity extends AppCompatActivity implements com.blankj.utilco
 
         final String appDir = getFilesDir().getAbsolutePath() + "/app";
         final Locale locale = getResources().getConfiguration().locale;
-        final String workspaceBaseDir = getExternalFilesDir(null).getAbsolutePath();
+        final String workspaceBaseDir = homeDirPath;
         final String timezone = TimeZone.getDefault().getID();
         new Thread(() -> {
             final String localIPs = Utils.getIPAddressList();
@@ -502,6 +553,14 @@ public class MainActivity extends AppCompatActivity implements com.blankj.utilco
             }
 
             Toast.makeText(this, "Permission denied", Toast.LENGTH_LONG).show();
+        } else if (requestCode == REQUEST_STORAGE_PERMISSION) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                // Permission granted, proceed with folder selection
+                pickStorageHomeFolder();
+            } else {
+                // Permission denied, handle the case
+                Toast.makeText(this, "Storage permission is required to choose a folder", Toast.LENGTH_LONG).show();
+            }
         }
 
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
@@ -522,8 +581,30 @@ public class MainActivity extends AppCompatActivity implements com.blankj.utilco
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent intent) {
+        super.onActivityResult(requestCode, resultCode, intent);
+
+        if (requestCode == REQUEST_MANAGE_ALL_CODE && resultCode == RESULT_OK) {
+            checkPrefForSavedFolder();
+        }
+
+        if (requestCode == FOLDER_PICKER_CODE && resultCode == RESULT_OK) {
+            if (intent != null) {
+                Uri treeUri = intent.getData();
+                Uri docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri,
+                        DocumentsContract.getTreeDocumentId(treeUri));
+                Log.i("Logseq/FolderPicker", "Got uri " + docUri);
+                String path = FileUtil.getPath(this, docUri);
+                Log.i("picker", "Convert to path " + FileUtil.getPath(this, docUri));
+                if (path == null || path.isEmpty()) {
+                    Toast.makeText(this, "Error with selected directory", Toast.LENGTH_LONG).show();
+                } else {
+                    saveFolderPath(path);
+                    startWithHomeFolder(path); // Call your function to set workspace
+                }
+            }
+        }
+
         if (null == uploadMessage) {
-            super.onActivityResult(requestCode, resultCode, intent);
             return;
         }
 
